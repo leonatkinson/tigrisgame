@@ -1,0 +1,276 @@
+<!-- File: build.xml
+ Description:  ant build file
+ Copyright (c) 2000-2007, Craig Moffitt.  All Rights Reserved.
+ Licensed under the Academic Free License ("AFL") v. 3.0;
+ you may not use this file except in compliance with the License.
+ You should have received a copy of the License with this program;
+ you may alternatively obtain a copy online at:
+ http://www.opensource.org/licenses/afl-3.0.php
+-->
+
+<project name="tigrisgame" default="compile" basedir=".">
+   <!-- set global properties for this build -->
+
+   <!-- the top level directory of the project's view.
+   this is where the *real* documents under live for source control.
+   the directory structure should ideally map to the user's view. -->
+   <property name="proj_root" value="/home/${ant.project.name}"/>
+
+   <!-- the top level directory of the user's view of the project.
+   this build.xml file should either live here or in src -->
+   <property name="proj_home" value="."/>
+
+   <!-- the directory with the java source files for the top level
+    package of the production code -->
+   <property name="src" value="${proj_home}/src"/>
+
+   <!-- the directory with the java source files for the top level package 
+    of the testing code.   this assumes a parallel code tree for seperating 
+    testing code but still allowing package private access -->
+   <property name="test" value="${proj_home}/test"/>
+
+   <!-- the directory where the distribution is built up 
+   (and then copied into the corresponding releases)
+   for now a lib (jars) directory is placed here -->
+   <property name="dist" value="${proj_home}/dist"/>
+
+   <!-- the directory from which programs are run -->
+   <property name="run" value="${proj_home}/run"/>
+
+   <!-- the directory that the class files from src and test are compiled
+    into this assumes a parallel code tree for seperating testing 
+    code but still allowing package private access -->
+   <property name="class" value="${proj_home}/class"/>
+
+   <!-- the directory where the distribution is copied into after
+   built up in dist, appropriately labeled by release stamp -->
+   <property name="release" value="${proj_root}/releases"/>
+
+   <!-- the CVS modules of the system.  
+   basically all the directories in cvsroot that need to be checked-out -->
+   <property name="tigrisgame" value="code test"/>
+
+   <!-- read in the environment variables into env.VARIABLE_NAME -->
+   <property environment="env"/>
+
+   <!-- the classpath for compiling below 
+   all elements copied exactly from setup.solaris.csh 
+   version 1.3 in the bin dir -->   
+   <path id="project.class.path">
+      <!-- The default classes.zip from Java seems to be -->
+      <!-- included already by default -->
+      <!-- something like this will grab all the jars in the lib directory -->
+      <!-- pathelement location="lib/"/ -->
+      <pathelement path="${env.SWING_HOME}/swing.jar"/>
+      <pathelement path="${env.LOG4J_HOME}/log4j.jar"/>
+   </path>
+
+   <!-- define the targets -->
+   <target name="init" description="perform any tasks common to all targets such as setting timestamps or creating directories">
+
+      <!-- Update the DSTAMP, TSTAMP, and TODAY properties -->
+      <tstamp/>
+
+      <!-- make sure we have the temporary class, jar, ... 
+      directories to put things into -->
+      <mkdir dir="${class}"/>
+      <mkdir dir="${dist}"/>
+      <mkdir dir="${run}"/>
+      <mkdir dir="${dist}/lib"/>
+
+      <echo>
+      ANT_HOME is set to = ${env.ANT_HOME}
+      SWING_HOME is set to = ${env.SWING_HOME}
+      LOG4J_HOME is set to = ${env.LOG4J_HOME}
+      proj_root? ${proj_root}
+      proj_home? ${proj_home}
+      src? ${src}
+      test? ${test}
+      class? ${class}
+      user? ${user.name}
+      dist? ${dist}
+      version? ${version}
+      </echo>
+
+   </target>
+
+   <target name="compile" depends="init" description="the default build that compiles everything from ${src} and puts it into ${class}, will try to be smart about only compiling as needed">
+      <!-- Depend destroys any out of date class files based
+             on class file dependencies -->
+      <!-- ... FIXME maybe i don't have the right version... -->
+      <!-- depend srcdir="${src}"
+              destdir="${class}"
+              cache=".antcache"
+              closure="yes" / -->
+
+      <!-- check for swingall.jar or jdk1.2 -->
+      <available property="hasSwing" classname="javax.swing.JPanel">
+         <classpath>
+	    <path refid="project.class.path"/>
+	 </classpath>   
+      </available>	 
+      <fail message="swingui code requires swing, either Java1.2 or Java1.1 with SWING_HOME set is required." unless="hasSwing"/>
+
+      <!-- Compile the java code from ${src} into ${class} -->
+      <javac srcdir="${src}" 
+             destdir="${class}"
+	     verbose="false"
+	     debug="true"
+             encoding="US-ASCII">
+	 <classpath>
+	    <path refid="project.class.path"/>
+	 </classpath>   
+      </javac>
+
+      <!-- copy resources to our dist/class directory. -->
+      <!-- current resources include maps and themes. -->
+      <copy todir="${class}/com/tigrisgame/">
+         <fileset dir="${src}/com/tigrisgame/">
+	   <include name="*.txt" />
+	 </fileset> 
+      </copy>
+<!--  <copy file="${src}/tigris/small_map.txt" todir="${class}/tigris/" /> -->
+   </target>
+
+   <target name="compile_test" depends="init,compile" description="compiles ${test} and puts it into ${class}">
+      <!-- check for junit.jar support to make the test program -->
+      <available property="hasJUnit" file="${env.JUNIT_HOME}/junit.jar"/>
+      <fail message="test code requires junit.jar, try checking JUNIT_HOME" unless="hasJUnit"/>
+      <javac srcdir="${test}" 
+             destdir="${class}"
+	     verbose="false"
+             encoding="US-ASCII"
+	     debug="true">
+	 <classpath>
+	    <path refid="project.class.path"/>
+            <pathelement path="${env.JUNIT_HOME}/junit.jar"/>
+	 </classpath>   
+      </javac>
+   </target>
+
+   <target name="dist" depends="init, jar" description="prepares a distribution in the dist directory, includes jar files, and other files">
+
+      <tar destfile="${dist}/tigrisgame-src.tgz" compression="gzip">
+         <tarfileset dir="." prefix="tigrisgame" mode="644" 
+	             username="tigris" group="tigris">
+	    <include name="src/com/tigrisgame/**/*.java"/>
+	    <include name="src/com/tigrisgame/*.txt"/>
+	    <include name="src/com/tigrisgame/**/*.java"/>
+	    <include name="dist/lib/**"/>
+	    <include name="test/com/tigrisgame/**/*.java"/>
+	    <include name="build.xml"/>
+	    <include name="setup.cygwin.bash"/>
+	 </tarfileset>
+      </tar>
+
+      <!-- make files that have a script to run with the right path.
+           still kind of in the works, might be usefull later.  -->
+  <!-- 
+
+      <path id="tmp.run.path">
+         <path refid="project.class.path" />
+	 <pathelement location="${class}" />
+      </path>
+      <pathconvert targetos="windows" 
+                   property="tmp.windows.path"
+		   refid="tmp.run.path"/>
+      <echo>
+         windows build path was ${tmp.windows.path}
+      </echo>
+
+      <pathconvert targetos="unix" 
+                   property="tmp.unix.path"
+		   refid="tmp.run.path"/>
+      <echo>
+         unix build path was ${tmp.unix.path}
+      </echo>
+   -->
+
+
+   </target>
+
+   <property name="runclass" value="com.tigrisgame.awtui.GUIGameClient"/>
+   <property name="runargs" value=""/>
+
+   <target name="run" depends="init,dist" description="run a program out of the current dist directory using ant's environment">
+      <!-- need fork=false to get stdin -->
+      <echo>Running:
+      runclass = ${runclass}
+      runargs  = ${runargs}
+      </echo>
+      <java classname="${runclass}" fork="yes">
+         <!-- jvmarg line="-Djava.compiler=NONE"/ -->
+	 <arg line="${runargs}" />
+	 <classpath>
+	    <path refid="project.class.path"/>
+	    <pathelement path="${dist}/lib/tigrisgame.jar"/>
+	 </classpath>   
+      </java>
+   </target>
+
+   <target name="clean" depends="init" description="cleans up the directories to force everything to be recompiled">
+      <!-- clean out the class dir and other temp files-->
+      <delete includeEmptyDirs="true">
+         <!-- remove emacs temp files -->
+         <fileset dir="${proj_home}" includes="**/*~" />
+         <!-- remove all class files -->
+         <fileset dir="${class}" includes="**/*" />
+         <fileset dir="${dist}" includes="**/*" />
+      </delete> 
+   </target>
+
+   <target name="jar" depends="init, compile" description="builds the jar file(s) from the current java files">
+      <jar jarfile="${dist}/lib/tigrisgame.jar" basedir="${class}" manifest="${src}/MANIFEST.MF">
+      </jar>
+   </target>
+
+   <target name="test" depends="compile_test">
+      <junit printsummary="true" haltonerror="true"  
+             haltonfailure="true" fork="yes" maxmemory="64M"
+	     timeout="15000">
+         <formatter type="plain" usefile="false" />
+         <classpath>
+	    <path refid="project.class.path"/>
+	    <pathelement path="${class}"/>
+            <pathelement path="${env.JUNIT_HOME}/junit.jar"/>
+	 </classpath>   
+         <test name="com.tigrisgame.rules.SpaceTest" />
+         <test name="com.tigrisgame.rules.MonumentTest" />
+         <test name="com.tigrisgame.rules.GameTest" />
+         <test name="com.tigrisgame.rules.BoardTest" />
+         <test name="com.tigrisgame.util.ArrayUtilsTest" />
+         <test name="com.tigrisgame.textgui.TextGameClientTest" />
+         <test name="com.tigrisgame.ai.GenTest" />
+         <test name="com.tigrisgame.ai.EvalTest" />
+         <test name="com.tigrisgame.ai.MiniMaxTest" />
+      </junit>
+   </target>
+
+   <!-- the point of this task is just to make sure you
+    specify the $version property -->
+   <target name="check-version" unless="version">
+      <echo message="Release version not specified!"/>
+      <echo message="Please specify the version with 'ant -Dversion=name &lt;target&gt; to" />
+      <fail message="doh!"/>
+   </target>
+
+   <target name="stamp" depends="check-version, init" description="stamps all files in the source tree with ${version} tag">
+      <!-- note: using the option tag="${version}" 
+      doesn't work for the tag command, only checkout -->
+      <cvs command="rtag -F ${version} tigrisgame" failonerror="true"/>
+   </target>
+   
+   <target name="release" depends="check-version, dist, stamp" description="copies the ${dist} into the ${release}/${version} and stamps the source">
+      <mkdir dir="${release}/${version}"/>
+      <copy todir="${release}/${version}" overwrite="true">
+         <fileset dir="${dist}"/>
+      </copy>
+      <echo>Tigrisgame release version ${version} done!</echo>
+   </target>
+
+   <target name="info" depends="init" description="finds which files are modified in the current view">
+      <cvs command="-n -q update" >
+      </cvs>
+   </target>
+
+</project>
