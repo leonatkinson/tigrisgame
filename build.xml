@@ -150,19 +150,9 @@
 
    <target name="dist" depends="init, jar" description="prepares a distribution in the dist directory, includes jar files, and other files">
 
-      <tar destfile="${dist}/tigrisgame-src.tgz" compression="gzip">
-         <tarfileset dir="." prefix="tigrisgame" mode="644" 
-	             username="tigris" group="tigris">
-	    <include name="src/com/tigrisgame/**/*.java"/>
-	    <include name="src/com/tigrisgame/*.txt"/>
-	    <include name="src/com/tigrisgame/**/*.java"/>
-	    <include name="dist/lib/**"/>
-	    <include name="test/com/tigrisgame/**/*.java"/>
-	    <include name="build.xml"/>
-	    <include name="setup.cygwin.bash"/>
-	 </tarfileset>
-      </tar>
-
+      <!-- Source is distributed through the public repository, which
+           satisfies Academic Free License v3.0 section 3. Only the
+           jar file is shipped in the dist directory. -->
       <!-- make files that have a script to run with the right path.
            still kind of in the works, might be usefull later.  -->
   <!-- 
