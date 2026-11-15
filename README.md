@@ -408,6 +408,39 @@ One integration note: only MiniMaxAI and MultiMaxAI are configurable
 through the `-Dtigris.ai.*` depth/prune/probability switches. CraigAI
 takes the game server in its constructor (it has no `setGameServer`)
 and is bounded by `-Dtigris.ai.thinkMillis` and
+
+### Tuning the AI Opponents
+
+The AI behavior is controlled by the following command‑line switches (see the **Command‑line switches** table). Adjusting them will make the opponents stronger or faster.
+
+- **`-Dtigris.ai.actionDepth=N`** – number of full actions the AI looks ahead.
+  Default: 2 (MiniMaxAI), 1 (MultiMaxAI).  Raise to 3–4 for deeper planning.
+
+- **`-Dtigris.ai.trueDepth=N`** – total plies (half‑moves) searched.
+  Default: 20 (MiniMaxAI), 10 (MultiMaxAI).  Larger values increase depth exponentially.
+
+- **`-Dtigris.ai.prune=N`** – maximum candidate moves kept at each node.
+  Default: 80 (MiniMaxAI/MultiMaxAI).  Set to 200–500 or 1000 for “unlimited” to explore more possibilities.
+
+- **`-Dtigris.ai.keepProb=X`** – for MultiMaxAI, probability threshold below which assumed opponent support hands are pruned.
+  Default: 0.01.  Lower it to 0.001 or 0.0001 to let the AI consider rarer hands.
+
+- **`-Dtigris.ai.thinkMillis=N`** – only for CraigAI, wall‑clock time the AI spends per move.
+  Default: 30000 ms.  Reduce to speed up play or increase for a tougher CraigAI.
+
+**Example – a stronger MiniMaxAI**
+
+```bash
+java -Dtigris.ai.actionDepth=3 -Dtigris.ai.trueDepth=25 -Dtigris.ai.prune=300 -jar dist/lib/tigrisgame.jar
+```
+
+**Example – a stronger MultiMaxAI**
+
+```bash
+java -Dtigris.ai.actionDepth=2 -Dtigris.ai.trueDepth=15 -Dtigris.ai.prune=200 -Dtigris.ai.keepProb=0.001 -jar dist/lib/tigrisgame.jar
+```
+
+Remember that higher values mean longer thinking times per move.  Balance the parameters to keep gameplay enjoyable while giving the AI a competitive edge.
 `-Dtigris.ai.actionDepth` instead; it was written first, and the Max
 family was created specifically to supersede it.
 
