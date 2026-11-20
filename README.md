@@ -499,3 +499,12 @@ family was created specifically to supersede it.
   * the starting player is chosen at random instead of always being
     seat 0
   * added `README.md` and the plain-text `LICENSE` (AFL 3.0)
+* **unreleased**
+  * Add move ordering to MiniMaxAI.generateMoves(): pre-score root
+    candidates with the static evaluator and try best moves first, so
+    alpha-beta gets a strong opening bound and prunes weak branches
+    throughout the tree.
+  * Document that MultiMaxAI's prune cap is its only search bound
+    (values above ~150 are a no-op since the generator naturally emits
+    fewer candidates) and that depth 4 is impractical for MultiMaxAI.
+
