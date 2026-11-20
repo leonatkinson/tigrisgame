@@ -739,35 +739,48 @@ public class MiniMaxAI
 	    printMoves( info, scoredMoves );
 	}
 
-	// TODO. pre-score the moves based on some algorithm
-	// this is what you know from the generation algorithm, 
-	// BEFORE you copy the game, apply the move, 
-	// and statically evaulate the new position.
+	// Pre-score the root candidates with a static evaluation of the
+	// successor position and order them best-first.  This is done only
+	// at the root: a single pass over the candidate moves gives alpha-beta
+	// a strong opening bound, which prunes weaker branches throughout the
+	// rest of the tree.  Pre-scanning at every node would dominate the
+	// search (it is cheaper to explore a subtree than to statically eval
+	// every sibling at every level), so deeper levels keep their
+	// generation order and rely on the bound propagated from the root.
+	if ( info.trueDepth == 0 && scoredMoves != null && scoredMoves.length > 0 ) {
+	    boolean maxNode = ( game.getMoveDynasty() == 0 );
+	    for ( int ii = 0; ii < scoredMoves.length; ii++ ) {
+	        Move candidate = scoredMoves[ii].move;
+	        if ( candidate == null ) {
+	            scoredMoves[ii].score = maxNode
+	                ? Integer.MIN_VALUE + 1 : Integer.MAX_VALUE;
+	            continue;
+	        }
+	        TigrisGame successor;
+	        try {
+	            successor = (TigrisGame) game.clone();
+	            successor.makeMove( candidate );
+	        } catch (IllegalMoveException ime) {
+	            // LegalMoveGenerator should only emit legal moves.
+	            scoredMoves[ii].score = maxNode
+	                ? Integer.MIN_VALUE + 1 : Integer.MAX_VALUE;
+	            continue;
+	        }
+	        scoredMoves[ii].score = evaluateGame( new MM_Game( successor ));
+	    }
 
-	// by randomizing, we get a healthy mix of 
-	// leader moves, tiles moves, etc.
- 	scoredMoves = (MM_Move []) ArrayUtils.randomize( scoredMoves );
-
-	// by sorting, we put the most promising moves towards the front.
-	// we could sort AFTER randomizing, so that "must consider" moves
-	// are at the front, but otherwise they are randomized.
-// 	ArrayUtils.sortDescending( scoredMoves, MM_Move.SORTER );
-
-// 	if ( viz != null ) {
-// 	    for ( int ii=maxPruneSize; ii<scoredMoves.length; ii++ ) {
-// 		viz.addChild( scoredMoves[ii].move, 
-// 			      scoredMoves[ii].assumedTiles );
-// 		int minScore = ( info.mmGame.game.getMoveDynasty() == 0 ) ?
-// 		    Integer.MIN_VALUE : Integer.MAX_VALUE;
-// 		viz.setScore( minScore );
-// 		viz.setPruned( true );
-// 		viz.ascend();
-// 	    }
-// 	}
+	    // best moves first: MAX (player 0) wants high scores first,
+	    // MIN (player 1) wants low scores first (bad for player 0).
+	    if ( maxNode ) {
+	        ArrayUtils.sortDescending( scoredMoves, MM_Move.SORTER );
+	    } else {
+	        ArrayUtils.sortAscending( scoredMoves, MM_Move.SORTER );
+	    }
+	}
 
 	// to limit the branch factor we return at most "maxPruneSize" moves.
 	scoredMoves = (MM_Move []) ArrayUtils.trimToSize( scoredMoves,
-							  maxPruneSize );
+	                          maxPruneSize );
 
 	if ( verbosity > info.trueDepth && printGen ) {
 	    System.out.println( "PRUNED MOVES: ");

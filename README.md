@@ -69,7 +69,7 @@ command list, `help <command>` for details on a single command, and
 | `-Dtigris.ai=MiniMaxAI\|MultiMaxAI\|CraigAI` | choose the AI opponent class (default: `MiniMaxAI` for 2 players, `MultiMaxAI` for 3–4 players)                                                              |
 | `-Dtigris.ai.actionDepth=N`                  | how many full actions deep the AI searches (default 2 for MiniMaxAI, 1 for MultiMaxAI)                                                                       |
 | `-Dtigris.ai.trueDepth=N`                    | how many total moves (plies) deep the AI searches (default 20 for MiniMaxAI, 10 for MultiMaxAI)                                                              |
-| `-Dtigris.ai.prune=N`                        | branch factor: candidate moves kept per node (default 80; 1000 ≈ unlimited)                                                                                  |
+| `-Dtigris.ai.prune=N`                        | branch factor: candidate moves kept per node (default 80; 1000 ≈ unlimited) — for MultiMaxAI, values above ~150 are a no-op                                                                                  |
 | `-Dtigris.ai.keepProb=X`                     | prune assumed opponent support hands below probability X (default 0.01; mostly meaningful for MultiMaxAI)                                                    |
 | `-Dtigris.ai.thinkMillis=N`                  | (**CraigAI only**) wall-clock think time per move (default 30000)                                                                                            |
 
@@ -421,6 +421,18 @@ The AI behavior is controlled by the following command‑line switches (see the 
 
 - **`-Dtigris.ai.prune=N`** – maximum candidate moves kept at each node.
   Default: 80 (MiniMaxAI/MultiMaxAI).  Set to 200–500 or 1000 for “unlimited” to explore more possibilities.
+
+  Note: this cap matters differently for each AI.  `MiniMaxAI` combines it with
+  alpha–beta pruning (and now move ordering), so a smaller `prune` mainly trims
+  the frontier; `MultiMaxAI` has no alpha–beta cutoffs, so `prune` is the
+  *only* thing bounding its search tree — lowering it (e.g. to 80–200) is the
+  most effective way to keep `MultiMaxAI` fast at deeper `actionDepth`.
+
+  Empirical rule of thumb for `MultiMaxAI`: the move generator naturally
+  produces fewer than ~150 candidates per node, so `prune` values above ~150
+  are effectively a no-op — depth 3 at `prune=1000` takes the same ~6 s as
+  `prune=200`.  You must drop below ~150 (try `prune=80`–`120`) to get any
+  speed benefit.  Depth 4 is not practical for `MultiMaxAI` at any prune.
 
 - **`-Dtigris.ai.keepProb=X`** – for MultiMaxAI, probability threshold below which assumed opponent support hands are pruned.
   Default: 0.01.  Lower it to 0.001 or 0.0001 to let the AI consider rarer hands.
