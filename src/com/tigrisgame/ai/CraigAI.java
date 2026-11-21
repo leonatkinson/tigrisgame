@@ -33,7 +33,8 @@ public class CraigAI extends DefaultGameObserver implements Runnable
     GameServer gameServer;
 
     Thread thinkingThread = null;
-    int decisionTreeSize = 0;
+    java.util.concurrent.atomic.AtomicInteger decisionTreeSize =
+	new java.util.concurrent.atomic.AtomicInteger( 0 );
 
     // signal variable for the thinking thread to make a move.
 //     boolean myMove = false;
@@ -42,8 +43,15 @@ public class CraigAI extends DefaultGameObserver implements Runnable
     // signal to the thinking thread that you can't expand 
     // your thinking tree anymore,
     // and to return a move asap.
-    boolean forceMove = false;
-    boolean abortSearch = false;
+    volatile boolean forceMove = false;
+    volatile boolean abortSearch = false;
+
+    /** number of root-level worker threads. 0 = not yet read from
+     * property (sentinel), 1 = sequential. */
+    int numThreads = 0;
+
+    /** lazy fixed thread pool for parallel root search; daemon threads. */
+    private java.util.concurrent.ExecutorService rootPool = null;
 
     // how long to think before aborting
     int maxThinkMillis = 30 * 1000;  // N times seconds.
@@ -82,6 +90,131 @@ public class CraigAI extends DefaultGameObserver implements Runnable
  	maxThinkActionDepth = depth;
     }
     
+    /** number of root-level worker threads. reads -Dtigris.ai.threads on
+     * first call; defaults to the available processor count, floored at 1. */
+    private int getNumThreads()
+    {
+	if ( numThreads == 0 ) { // sentinel: not yet read from property
+	    String v = System.getProperty( "tigris.ai.threads" );
+	    if ( v != null ) {
+		try {
+		    numThreads = Integer.parseInt( v.trim() );
+		}
+		catch ( NumberFormatException nfe ) {
+		    numThreads = 1;
+		}
+	    }
+	    if ( numThreads <= 0 ) {
+		numThreads = Math.max( 1,
+		    Runtime.getRuntime().availableProcessors() );
+	    }
+	}
+	return numThreads;
+    }
+
+    /** lazy fixed thread pool for parallel root search; daemon threads. */
+    private java.util.concurrent.ExecutorService getRootPool()
+    {
+	if ( rootPool == null ) {
+	    int n = getNumThreads();
+	    rootPool = java.util.concurrent.Executors
+		.newFixedThreadPool( n,
+		    r -> { Thread t = new Thread( r, "CraigAI-root-" + n );
+		           t.setDaemon( true ); return t; } );
+	}
+	return rootPool;
+    }
+
+    /** result from one parallel root worker: the best root move found
+     * in the worker's chunk (best by score, first on ties). */
+    private static class CraigRootResult
+    {
+	int score = Integer.MIN_VALUE;
+	Move decision = null;
+	int index = -1;
+    }
+
+    /**
+     * Evaluate a set of root-level decisions in parallel across worker
+     * threads.  Each worker gets its own deep clone of the game and
+     * evaluates its chunk of decisions, sharing the same wall-clock
+     * deadline (stopThink) and abort flags.  Returns the reduced best
+     * result, or null to fall back to the sequential loop.
+     */
+    private CraigRootResult searchRootMovesParallelCraig(
+	    TigrisGame actualGame, Move [] decisions, Date stopThink,
+	    int actionDepth )
+    {
+	int numThreads = getNumThreads();
+	int numWorkers = Math.min( decisions.length, numThreads );
+	if ( numWorkers < 2 )
+	    return null;
+
+	java.util.concurrent.ExecutorService pool = getRootPool();
+	java.util.ArrayList<java.util.concurrent.Callable<CraigRootResult>> tasks =
+	    new java.util.ArrayList<>( numWorkers );
+
+	int chunkSize = ( decisions.length + numWorkers - 1 ) / numWorkers;
+	for ( int w = 0; w < numWorkers; w++ ) {
+	    int start = w * chunkSize;
+	    int end = Math.min( start + chunkSize, decisions.length );
+	    if ( start >= end )
+		break;
+	    final int s = start, e = end;
+	    tasks.add( () -> {
+		CraigRootResult local = new CraigRootResult();
+		for ( int ii = s; ii < e; ii++ ) {
+		    if ( abortSearch )
+			break;
+		    try {
+			TigrisGame gamePrime = (TigrisGame) actualGame.clone();
+			gamePrime.makeMove( decisions[ ii ] );
+			int [] allScores = evaluateGame( gamePrime, stopThink,
+							actionDepth, 1,
+							false );
+			int score = allScores[ gamePrime.getMoveDynasty() ];
+			if ( score > local.score ) {
+			    local.score = score;
+			    local.decision = decisions[ ii ];
+			    local.index = ii;
+			}
+		    }
+		    catch ( ForceMoveException fme ) {
+			break; // time up or abort: return what we have
+		    }
+		    catch ( Exception ex ) {
+			continue; // try the next decision
+		    }
+		}
+		return local;
+	    } );
+	}
+
+	java.util.List<java.util.concurrent.Future<CraigRootResult>> futures;
+	try {
+	    futures = pool.invokeAll( tasks );
+	}
+	catch ( InterruptedException ie ) {
+	    return null; // fall back to sequential
+	}
+
+	CraigRootResult best = null;
+	int bestScore = Integer.MIN_VALUE;
+	for ( java.util.concurrent.Future<CraigRootResult> f : futures ) {
+	    try {
+		CraigRootResult r = f.get();
+		if ( r == null )
+		    continue;
+		if ( r.score > bestScore ) {
+		    bestScore = r.score;
+		    best = r;
+		}
+	    }
+	    catch ( Exception ex ) { }
+	}
+	return best;
+    }
+
     // **********************
     // Implement GameObserver
     // **********************
@@ -103,7 +236,7 @@ public class CraigAI extends DefaultGameObserver implements Runnable
 	abortSearch = false;
 	forceMove = false;
 	// reset the move counter.
-	decisionTreeSize = 0;
+	decisionTreeSize.set( 0 );
 
 	thinkingThread = new Thread( this );
 	// set min priority so the gui is responsive.
@@ -190,8 +323,22 @@ public class CraigAI extends DefaultGameObserver implements Runnable
 	// action depth MUST be positive, otherwise it will 
 	// do a depth first search to solve the game.
 	int actionDepth = maxThinkActionDepth;
+	// parallel root search: evaluate root decisions on separate
+	// worker threads with their own game clones.
+	boolean parallelHandled = false;
+	if ( getNumThreads() > 1 && decisions.length > 1 ) {
+	    CraigRootResult best = searchRootMovesParallelCraig(
+		actualGame, decisions, stopThink, actionDepth );
+	    if ( best != null && best.decision != null ) {
+		bestScore = best.score;
+		bestDecision = best.decision;
+		bestIndex = best.index;
+		parallelHandled = true;
+	    }
+	}
 
-	for ( int ii=0; ii<decisions.length; ii++) {
+
+	for ( int ii=0; !parallelHandled && ii<decisions.length; ii++) {
 
 	    // clone game and make the move.
 	    // then eval the position for each of the
@@ -276,7 +423,7 @@ public class CraigAI extends DefaultGameObserver implements Runnable
 	    throw new ForceMoveException("abortSearch flag set");
 
 	// increment the counter for statistics
-	decisionTreeSize ++;
+	decisionTreeSize.incrementAndGet();
 
 	// decrement actionDepth if the current move is an action.
 	// that way an initial actionDepth of 1 will analyze all side effects
