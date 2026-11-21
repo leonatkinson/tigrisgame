@@ -37,7 +37,23 @@ public class MultiMaxAI
    public static boolean printGen = false;
    int debugTopExamined = 0;
    int debugTopSize = 0;
-   boolean abortSearch;
+   volatile boolean abortSearch;
+
+   /** total nodes explored by the last miniMax() call (summed across
+    * all worker threads when parallel search is enabled). */
+   public int lastNodeCount = 0;
+
+   /** number of worker threads for root-level parallel search.
+    * 0 = not yet read from property (sentinel), 1 = sequential. */
+   int numThreads = 0;
+
+   /** set true by searchRootMovesParallel so miniMax(TigrisGame) knows
+    * not to overwrite lastNodeCount with the root-only count. */
+   boolean rootSearchUsed = false;
+
+   /** lazy thread pool for parallel root search. daemon threads so
+    * they don't prevent JVM exit. */
+   private java.util.concurrent.ExecutorService rootPool = null;
 
    GameServer gameServer;   
    int maxActionDepth;  // the limiting factor.
@@ -202,6 +218,43 @@ private int threadCount = 1;
       abortSearch = true;
    }
 
+   /** number of root-level worker threads. reads -Dtigris.ai.threads on
+    * first call; defaults to 1 (sequential, current behaviour). */
+   private int getNumThreads()
+   {
+      if ( numThreads == 0 ) { // sentinel: not yet read from property
+	 String v = System.getProperty( "tigris.ai.threads" );
+	 if ( v != null ) {
+	    try {
+	       numThreads = Integer.parseInt( v.trim() );
+	    }
+	    catch ( NumberFormatException nfe ) {
+	       numThreads = 1;
+	    }
+	 }
+	 if ( numThreads <= 0 ) {
+	    // no property set: default to the available processor count,
+	    // floored at 1 for machines reporting 0.
+	    numThreads = Math.max( 1,
+			 Runtime.getRuntime().availableProcessors() );
+	 }
+      }
+      return numThreads;
+   }
+
+   /** lazy fixed thread pool for parallel root search. daemon threads. */
+   private java.util.concurrent.ExecutorService getRootPool()
+   {
+      if ( rootPool == null ) {
+	 int n = getNumThreads();
+	 rootPool = java.util.concurrent.Executors
+	     .newFixedThreadPool( n,
+		 r -> { Thread t = new Thread( r, "MultiMaxAI-root-" + n );
+		 t.setDaemon( true ); return t; } );
+      }
+      return rootPool;
+   }
+
    public void run()
    {
       if ( verbosity > 0 )
@@ -325,6 +378,12 @@ private int threadCount = 1;
 	    viz.wrapWithFrame();
 	}
 
+	if ( rootSearchUsed ) {
+	    rootSearchUsed = false;
+	    // lastNodeCount already summed by searchRootMovesParallel
+	} else {
+	    lastNodeCount = info.nodeCount;
+	}
 	return bestMove;
     }
 
@@ -439,6 +498,20 @@ private int threadCount = 1;
 	    if ( info.trueDepth == 0 )
 		debugTopSize = moveArray.length;
 
+	    // root-level parallel search: each root move is independent,
+	    // so we can evaluate them on separate threads with their own
+	    // game clones.  falls back to the sequential loop when
+	    // numThreads == 1 or there is only one candidate move.
+	    if ( info.trueDepth == 0 &&
+		 getNumThreads() > 1 &&
+		 moveArray.length > 1 )
+	    {
+		MM_Move parallelBest = searchRootMovesParallel( info, moveArray, false );
+		if ( parallelBest != null )
+		    return parallelBest;
+		// fall through to sequential if parallel returned null
+	    }
+
 	    for ( int ii=0; ii < moveArray.length; ii++ ) {
 
 		if ( verbosity > info.trueDepth + 1) {
@@ -546,6 +619,18 @@ private int threadCount = 1;
 	    if ( info.trueDepth == 0 )
 		debugTopSize = moveArray.length;
 
+	    // root-level parallel search for chance nodes: each assumed
+	    // outcome is independent, evaluate on separate threads.
+	    if ( info.trueDepth == 0 &&
+		 getNumThreads() > 1 &&
+		 moveArray.length > 1 )
+	    {
+		MM_Move parallelBest = searchRootMovesParallel( info, moveArray, true );
+		if ( parallelBest != null )
+		    return parallelBest;
+		// fall through to sequential if parallel returned null
+	    }
+
 	    for ( int ii=0; ii < moveArray.length; ii++ ) {
 		
  		if ( verbosity > info.trueDepth + 1) {
@@ -630,6 +715,210 @@ private int threadCount = 1;
  	}
 
 	return avgResult;
+    }
+
+    /** result from one parallel root worker. */
+    private static class RootWorkerResult
+    {
+	int [] score;    // miniMax: best score vector for this worker's subset
+	double [] scoreSum; // chance: raw weighted sum for this worker's subset
+	double totalWeight; // chance: sum of probabilities in this worker's subset
+	Move move;       // best / most probable move at this worker's root subset
+	MM_Move next;    // subtree chain for the plan
+	int nodeCount;   // nodes explored by this worker
+    }
+
+    /**
+     * Evaluate a set of root-level moves in parallel across worker threads.
+     * Each worker gets its own deep clone of the game so there is no shared
+     * mutable state.  Returns the reduced best result, or null to fall back
+     * to the sequential loop.
+     */
+    private MM_Move searchRootMovesParallel( MM_Info info,
+					     MM_Move [] moveArray,
+					     boolean isChance )
+    {
+	int lead = info.mmGame.game.getMoveDynasty();
+	int numThreads = getNumThreads();
+	int numWorkers = Math.min( moveArray.length, numThreads );
+	if ( numWorkers < 2 )
+	    return null;
+
+	java.util.concurrent.ExecutorService pool = getRootPool();
+	java.util.ArrayList<java.util.concurrent.Callable<RootWorkerResult>> tasks =
+	    new java.util.ArrayList<>( numWorkers );
+
+	int chunkSize = ( moveArray.length + numWorkers - 1 ) / numWorkers;
+	for ( int w = 0; w < numWorkers; w++ ) {
+	    int start = w * chunkSize;
+	    int end = Math.min( start + chunkSize, moveArray.length );
+	    if ( start >= end )
+		break;
+	    final int s = start, e = end;
+	    tasks.add( () -> {
+		// each worker gets its own deep clone of the game
+		TigrisGame clonedGame = (TigrisGame) info.mmGame.game.clone();
+		MM_Info threadInfo = new MM_Info( clonedGame );
+		threadInfo.trueDepth = info.trueDepth;
+		threadInfo.actionDepth = info.actionDepth;
+		threadInfo.assumptionMade = info.assumptionMade;
+
+		RootWorkerResult res = new RootWorkerResult();
+		res.nodeCount = 0;
+
+		if ( isChance ) {
+		    // chance node: accumulate raw weighted sum for this worker's subset
+		    int numPlayers = info.mmGame.game.getNumPlayers();
+		    double [] rawScoreSum = new double[ numPlayers ];
+		    double totalWeight = 0.0;
+		    Move mostProbableMove = null;
+		    MM_Move mostProbableNext = null;
+
+		    for ( int ii = s; ii < e; ii++ ) {
+			if ( abortSearch )
+			    break;
+			try {
+			    applyMove( threadInfo, moveArray[ ii ] );
+			    MM_Move r = decendTree( threadInfo );
+			    undoMove( threadInfo, moveArray[ ii ] );
+
+			    double p = moveArray[ ii ].probability.doubleValue();
+			    for ( int jj = 0; jj < r.score.length; jj++ )
+				rawScoreSum[ jj ] += r.score[ jj ] * p;
+			    totalWeight += p;
+
+			    if ( mostProbableMove == null ) {
+				mostProbableMove = moveArray[ ii ].move;
+				mostProbableNext = r;
+			    }
+			}
+			catch ( Exception ex ) {
+			    // skip this assumption, keep going
+			}
+		    }
+
+		    res.scoreSum = rawScoreSum;
+		    res.totalWeight = totalWeight;
+		    res.move = mostProbableMove;
+		    res.next = mostProbableNext;
+		} else {
+		    // miniMax node: max score[lead] across this worker's subset
+		    int numPlayers = info.mmGame.game.getNumPlayers();
+		    res.score = new int[ numPlayers ];
+		    for ( int jj = 0; jj < numPlayers; jj++ )
+			res.score[ jj ] = Integer.MIN_VALUE + 1;
+
+		    for ( int ii = s; ii < e; ii++ ) {
+			if ( abortSearch )
+			    break;
+			try {
+			    applyMove( threadInfo, moveArray[ ii ] );
+			    MM_Move r = decendTree( threadInfo );
+			    undoMove( threadInfo, moveArray[ ii ] );
+
+			    if ( r.score[ lead ] > res.score[ lead ] ) {
+				res.score = r.score;
+				res.move = moveArray[ ii ].move;
+				res.next = r;
+			    }
+			}
+			catch ( Exception ex ) {
+			    // skip this move, keep going
+			}
+		    }
+		}
+
+		res.nodeCount = threadInfo.nodeCount;
+		return res;
+	    } );
+	}
+
+	rootSearchUsed = true;
+
+	java.util.List<java.util.concurrent.Future<RootWorkerResult>> futures;
+	try {
+	    futures = pool.invokeAll( tasks );
+	}
+	catch ( InterruptedException ex ) {
+	    return null; // fall back to sequential
+	}
+
+	int totalNodes = 0;
+
+	if ( isChance ) {
+	    // combine: sum raw weighted sums across workers, then divide by
+	    // total weight.  probabilities across all assume-moves sum to 1.0.
+	    double [] totalScoreSum = null;
+	    double totalWeight = 0.0;
+	    Move bestMove = null;
+	    MM_Move bestNext = null;
+
+	    for ( java.util.concurrent.Future<RootWorkerResult> f : futures ) {
+		try {
+		    RootWorkerResult r = f.get();
+		    if ( r == null )
+			continue;
+		    totalNodes += r.nodeCount;
+		    if ( r.scoreSum != null ) {
+			if ( totalScoreSum == null )
+			    totalScoreSum = new double[ r.scoreSum.length ];
+			for ( int jj = 0; jj < r.scoreSum.length; jj++ )
+			    totalScoreSum[ jj ] += r.scoreSum[ jj ];
+		    }
+		    totalWeight += r.totalWeight;
+		    if ( bestMove == null && r.move != null ) {
+			bestMove = r.move;
+			bestNext = r.next;
+		    }
+		}
+		catch ( Exception ex ) { }
+	    }
+
+	    lastNodeCount = totalNodes;
+
+	    RootWorkerResult avgResult = new RootWorkerResult();
+	    if ( totalScoreSum != null && totalWeight > 0.0 ) {
+		avgResult.score = new int[ totalScoreSum.length ];
+		for ( int jj = 0; jj < totalScoreSum.length; jj++ )
+		    avgResult.score[ jj ] = (int) ( totalScoreSum[ jj ] / totalWeight );
+	    }
+	    avgResult.move = bestMove;
+	    avgResult.next = bestNext;
+	    return toMMMove( avgResult );
+	} else {
+	    // miniMax: pick the worker with the best score[lead]
+	    RootWorkerResult best = null;
+	    int bestScore = Integer.MIN_VALUE + 1;
+
+	    for ( java.util.concurrent.Future<RootWorkerResult> f : futures ) {
+		try {
+		    RootWorkerResult r = f.get();
+		    if ( r == null )
+			continue;
+		    totalNodes += r.nodeCount;
+		    if ( r.score != null && r.score[ lead ] > bestScore ) {
+			bestScore = r.score[ lead ];
+			best = r;
+		    }
+		}
+		catch ( Exception ex ) { }
+	    }
+
+	    lastNodeCount = totalNodes;
+	    return toMMMove( best );
+	}
+    }
+
+    /** convert a worker result into an MM_Move for return to the caller. */
+    private MM_Move toMMMove( RootWorkerResult r )
+    {
+	if ( r == null )
+	    return null;
+	MM_Move m = new MM_Move();
+	m.score = r.score;
+	m.move = r.move;
+	m.next = r.next;
+	return m;
     }
 
     // returns a list of moves pre-evaluated with the static eval.

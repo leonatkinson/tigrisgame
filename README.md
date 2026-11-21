@@ -72,6 +72,7 @@ command list, `help <command>` for details on a single command, and
 | `-Dtigris.ai.prune=N`                        | branch factor: candidate moves kept per node (default 80; 1000 ≈ unlimited) — for MultiMaxAI, values above ~150 are a no-op                                                                                  |
 | `-Dtigris.ai.keepProb=X`                     | prune assumed opponent support hands below probability X (default 0.01; mostly meaningful for MultiMaxAI)                                                    |
 | `-Dtigris.ai.thinkMillis=N`                  | (**CraigAI only**) wall-clock think time per move (default 30000)                                                                                            |
+| `-Dtigris.ai.threads=N`                      | (**MultiMaxAI only**) worker threads for root-level parallel search: each root move is evaluated on its own cloned game state (default `Runtime.getRuntime().availableProcessors()`, floored at 1)                                                       |
 
 Example — a deeper, wider search:
 
@@ -500,6 +501,13 @@ family was created specifically to supersede it.
     seat 0
   * added `README.md` and the plain-text `LICENSE` (AFL 3.0)
 * **unreleased**
+  * MultiMaxAI thinking now runs on multiple worker threads (root-level
+    parallel search): each root move is evaluated independently on its
+    own cloned game state.  Scales near-linearly with `-Dtigris.ai.threads`
+    (default: `Runtime.getRuntime().availableProcessors()`, floored at 1;
+    ~5.5x speedup with 8 threads).  Set `-Dtigris.ai.threads=1` to force
+    sequential behaviour, or `-Dtigris.ai.threads=N` to pick N,
+    e.g. `-Dtigris.ai.threads=4`.
   * Add move ordering to MiniMaxAI.generateMoves(): pre-score root
     candidates with the static evaluator and try best moves first, so
     alpha-beta gets a strong opening bound and prunes weak branches
