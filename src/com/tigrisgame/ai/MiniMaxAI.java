@@ -36,8 +36,23 @@ public class MiniMaxAI
    public static boolean printGen = false;
    int debugTopExamined = 0;
    int debugTopSize = 0;
-   boolean abortSearch;
-   
+   volatile boolean abortSearch;
+
+   /** number of root-level worker threads. 0 = not yet read from property
+    * (sentinel), 1 = sequential. */
+   int numThreads = 0;
+
+   /** set true by searchRootMovesParallelMiniMax so miniMax(TigrisGame)
+    * knows not to overwrite lastNodeCount with the root-only count. */
+   boolean rootSearchUsed = false;
+
+   /** total nodes explored by the last miniMax() call (summed across
+    * all worker threads when parallel search is enabled). */
+   public int lastNodeCount = 0;
+
+   /** lazy fixed thread pool for parallel root search; daemon threads. */
+   private java.util.concurrent.ExecutorService rootPool = null;
+
    GameServer gameServer;
    
    int maxActionDepth = 2;  // the limiting factor.
@@ -315,7 +330,309 @@ public class MiniMaxAI
 	    viz.wrapWithFrame();
 	}
 
+	if ( rootSearchUsed ) {
+	    rootSearchUsed = false;
+	    // lastNodeCount already summed by searchRootMovesParallelMiniMax
+	} else {
+	    lastNodeCount = info.nodeCount;
+	}
+
 	return bestMove;
+    }
+
+    /** result from one parallel root worker. */
+    private static class RootWorkerResult
+    {
+	int score;          // best result score for this worker's subset
+	Move move;          // best root move in this worker's subset
+	MM_Move next;       // subtree chain for the plan
+	int nodeCount;      // nodes explored by this worker
+	double scoreSum;    // accumulated weighted score (chance nodes)
+	Move mostProbMove;  // most probable move in the subset (chance)
+	MM_Move mostProbNext; // subtree chain of the most probable move
+    }
+
+    /** number of root-level worker threads. reads -Dtigris.ai.threads on
+     * first call; defaults to the available processor count, floored at 1. */
+    private int getNumThreads()
+    {
+	if ( numThreads == 0 ) { // sentinel: not yet read from property
+	    String v = System.getProperty( "tigris.ai.threads" );
+	    if ( v != null ) {
+		try {
+		    numThreads = Integer.parseInt( v.trim() );
+		}
+		catch ( NumberFormatException nfe ) {
+		    numThreads = 1;
+		}
+	    }
+	    if ( numThreads <= 0 ) {
+		numThreads = Math.max( 1,
+		    Runtime.getRuntime().availableProcessors() );
+	    }
+	}
+	return numThreads;
+    }
+
+    /** lazy fixed thread pool for parallel root search; daemon threads. */
+    private java.util.concurrent.ExecutorService getRootPool()
+    {
+	if ( rootPool == null ) {
+	    int n = getNumThreads();
+	    rootPool = java.util.concurrent.Executors
+		.newFixedThreadPool( n,
+		    r -> { Thread t = new Thread( r, "MiniMaxAI-root-" + n );
+		           t.setDaemon( true ); return t; } );
+	}
+	return rootPool;
+    }
+
+    /**
+     * Evaluate a set of root-level moves in parallel across worker threads.
+     * Each worker gets its own deep clone of the game so there is no
+     * shared mutable state.  Returns the reduced best result (MiniMaxAI
+     * node parity: player 0 maximises score[0], others minimise), or
+     * null to fall back to the sequential loop.
+     */
+    private MM_Move searchRootMovesParallelMiniMax( MM_Info info,
+						    MM_Move [] moveArray )
+    {
+	int lead = info.mmGame.game.getMoveDynasty();
+	boolean isLeader = ( lead == 0 );
+	int numThreads = getNumThreads();
+	int numWorkers = Math.min( moveArray.length, numThreads );
+	if ( numWorkers < 2 )
+	    return null;
+
+	java.util.concurrent.ExecutorService pool = getRootPool();
+	java.util.ArrayList<java.util.concurrent.Callable<RootWorkerResult>> tasks =
+	    new java.util.ArrayList<>( numWorkers );
+
+	int chunkSize = ( moveArray.length + numWorkers - 1 ) / numWorkers;
+	for ( int w = 0; w < numWorkers; w++ ) {
+	    int start = w * chunkSize;
+	    int end = Math.min( start + chunkSize, moveArray.length );
+	    if ( start >= end )
+		break;
+	    final int s = start, e = end;
+	    final boolean isLeaderF = isLeader;
+	    tasks.add( () -> {
+		// each worker gets its own deep clone of the game
+		TigrisGame clonedGame = (TigrisGame) info.mmGame.game.clone();
+		MM_Info threadInfo = new MM_Info( clonedGame );
+		threadInfo.trueDepth = info.trueDepth;
+		threadInfo.actionDepth = info.actionDepth;
+		threadInfo.assumptionMade = info.assumptionMade;
+
+		RootWorkerResult res = new RootWorkerResult();
+		res.score = isLeaderF ? Integer.MIN_VALUE + 1
+		                      : Integer.MAX_VALUE;
+
+		for ( int ii = s; ii < e; ii++ ) {
+		    if ( abortSearch )
+			break;
+		    try {
+			applyMove( threadInfo, moveArray[ ii ] );
+			MM_Move result = decendTree( threadInfo );
+			undoMove( threadInfo, moveArray[ ii ] );
+
+			if ( isLeaderF ) {
+			    if ( result.score > res.score ) {
+				res.score = result.score;
+				res.move = moveArray[ ii ].move;
+				res.next = result;
+			    }
+			} else {
+			    if ( result.score < res.score ) {
+				res.score = result.score;
+				res.move = moveArray[ ii ].move;
+				res.next = result;
+			    }
+			}
+		    }
+		    catch ( ThreadDeath td ) {
+			break; // aborted mid-search
+		    }
+		    catch ( IllegalMoveException ime ) {
+			continue; // try the next move
+		    }
+		    catch ( Exception ex ) {
+			continue;
+		    }
+		}
+
+		res.nodeCount = threadInfo.nodeCount;
+		return res;
+	    } );
+	}
+
+	rootSearchUsed = true;
+
+	java.util.List<java.util.concurrent.Future<RootWorkerResult>> futures;
+	try {
+	    futures = pool.invokeAll( tasks );
+	}
+	catch ( InterruptedException ie ) {
+	    return null; // fall back to sequential
+	}
+
+	RootWorkerResult best = null;
+	int bestScore = isLeader ? Integer.MIN_VALUE + 1 : Integer.MAX_VALUE;
+	int totalNodes = 0;
+
+	for ( java.util.concurrent.Future<RootWorkerResult> f : futures ) {
+	    try {
+		RootWorkerResult r = f.get();
+		if ( r == null )
+		    continue;
+		totalNodes += r.nodeCount;
+		boolean better = isLeader
+		    ? ( r.score > bestScore )
+		    : ( r.score < bestScore );
+		if ( better ) {
+		    bestScore = r.score;
+		    best = r;
+		}
+	    }
+	    catch ( Exception ex ) { }
+	}
+
+	rootSearchUsed = true;
+	lastNodeCount = totalNodes;
+	if ( best == null ) {
+	    // no worker produced a better result (e.g., all aborted):
+	    // return a default move like the sequential path's
+	    // bestResult.move = moveArray[0].move.
+	    MM_Move def = new MM_Move();
+	    def.move = moveArray[ 0 ].move;
+	    return def;
+	}
+	return toMMMove( best );
+    }
+
+    /** convert a worker result into an MM_Move for return to the caller. */
+    private MM_Move toMMMove( RootWorkerResult r )
+    {
+	if ( r == null )
+	    return null;
+	MM_Move m = new MM_Move();
+	m.score = r.score;
+	m.move = r.move;
+	m.next = r.next;
+	return m;
+    }
+
+    /**
+     * Evaluate a set of root-level chance moves (assumed opponent tiles)
+     * in parallel.  Each worker gets its own deep clone of the game.
+     * Workers return their weighted-score sum; the main thread sums the
+     * sums (probabilities across all assume-moves sum to 1.0).  Returns
+     * the reduced MM_Move, or null to fall back to the sequential loop.
+     */
+    private MM_Move searchRootMovesParallelChanceMiniMax( MM_Info info,
+							  MM_Move [] moveArray )
+    {
+	int numThreads = getNumThreads();
+	int numWorkers = Math.min( moveArray.length, numThreads );
+	if ( numWorkers < 2 )
+	    return null;
+
+	java.util.concurrent.ExecutorService pool = getRootPool();
+	java.util.ArrayList<java.util.concurrent.Callable<RootWorkerResult>> tasks =
+	    new java.util.ArrayList<>( numWorkers );
+
+	int chunkSize = ( moveArray.length + numWorkers - 1 ) / numWorkers;
+	for ( int w = 0; w < numWorkers; w++ ) {
+	    int start = w * chunkSize;
+	    int end = Math.min( start + chunkSize, moveArray.length );
+	    if ( start >= end )
+		break;
+	    final int s = start, e = end;
+	    tasks.add( () -> {
+		// each worker gets its own deep clone of the game
+		TigrisGame clonedGame = (TigrisGame) info.mmGame.game.clone();
+		MM_Info threadInfo = new MM_Info( clonedGame );
+		threadInfo.trueDepth = info.trueDepth;
+		threadInfo.actionDepth = info.actionDepth;
+		threadInfo.assumptionMade = info.assumptionMade;
+
+		RootWorkerResult res = new RootWorkerResult();
+
+		for ( int ii = s; ii < e; ii++ ) {
+		    if ( abortSearch )
+			break;
+		    try {
+			applyMove( threadInfo, moveArray[ ii ] );
+			MM_Move result = decendTree( threadInfo );
+			undoMove( threadInfo, moveArray[ ii ] );
+
+			if ( result != null && result.score != 0 ) {
+			    if ( moveArray[ ii ].probability != null )
+				res.scoreSum += result.score
+				    * moveArray[ ii ].probability.doubleValue();
+			    else
+				res.scoreSum += result.score;
+			}
+			if ( res.mostProbMove == null ) {
+			    res.mostProbMove = moveArray[ ii ].move;
+			    res.mostProbNext = result;
+			}
+		    }
+		    catch ( ThreadDeath td ) {
+			break;
+		    }
+		    catch ( IllegalMoveException ime ) {
+			continue;
+		    }
+		    catch ( Exception ex ) {
+			continue;
+		    }
+		}
+
+		res.nodeCount = threadInfo.nodeCount;
+		return res;
+	    } );
+	}
+
+	rootSearchUsed = true;
+
+	java.util.List<java.util.concurrent.Future<RootWorkerResult>> futures;
+	try {
+	    futures = pool.invokeAll( tasks );
+	}
+	catch ( InterruptedException ie ) {
+	    rootSearchUsed = false;
+	    return null;
+	}
+
+	double totalScoreSum = 0.0;
+	Move bestMove = null;
+	MM_Move bestNext = null;
+	int totalNodes = 0;
+
+	for ( java.util.concurrent.Future<RootWorkerResult> f : futures ) {
+	    try {
+		RootWorkerResult r = f.get();
+		if ( r == null )
+		    continue;
+		totalNodes += r.nodeCount;
+		totalScoreSum += r.scoreSum;
+		if ( bestMove == null && r.mostProbMove != null ) {
+		    bestMove = r.mostProbMove;
+		    bestNext = r.mostProbNext;
+		}
+	    }
+	    catch ( Exception ex ) { }
+	}
+
+	rootSearchUsed = true;
+	lastNodeCount = totalNodes;
+
+	MM_Move avgResult = new MM_Move();
+	avgResult.score = (int) totalScoreSum;
+	avgResult.move = bestMove;
+	avgResult.next = bestNext;
+	return avgResult;
     }
 
     // decend tree decides what type of miniMax call to make
@@ -430,6 +747,18 @@ public class MiniMaxAI
 
 	    if ( info.trueDepth == 0 )
 		debugTopSize = moveArray.length;
+
+	    // root-level parallel search: each root move is independent,
+	    // evaluate them on separate worker threads with own game clones.
+	    if ( info.trueDepth == 0 &&
+		 getNumThreads() > 1 &&
+		 moveArray.length > 1 )
+	    {
+		MM_Move parallelBest = searchRootMovesParallelMiniMax( info, moveArray );
+		if ( parallelBest != null )
+		    return parallelBest;
+		// fall through to sequential if parallel returned null
+	    }
 
 	    for ( int ii=0; ii < moveArray.length; ii++ ) {
 
@@ -575,6 +904,18 @@ public class MiniMaxAI
 
 	    if ( info.trueDepth == 0 )
 		debugTopSize = moveArray.length;
+
+	    // root-level parallel search for chance nodes: each assumed
+	    // outcome is independent, evaluate on separate worker threads.
+	    if ( info.trueDepth == 0 &&
+		 getNumThreads() > 1 &&
+		 moveArray.length > 1 )
+	    {
+		MM_Move parallelBest = searchRootMovesParallelChanceMiniMax( info, moveArray );
+		if ( parallelBest != null )
+		    return parallelBest;
+		// fall through to sequential if parallel returned null
+	    }
 
 	    for ( int ii=0; ii < moveArray.length; ii++ ) {
 		
