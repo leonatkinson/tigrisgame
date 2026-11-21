@@ -461,8 +461,8 @@ family was created specifically to supersede it.
 
 ## Change Log
 
-* **1.0** — Original Craig Moffitt Release circa 2007.
-* **1.1** — Modifications by leonatkinson:
+* **1.0** - Original Craig Moffitt Release circa 2007.
+* **1.1** - Modifications by Leon Aktinson
   * automatic UI scaling for HiDPI/4K displays, with a
     `-Dtigris.scale` override (fonts, panels, tile sizes, menu text)
   * fixed the menu bar never appearing (`main()` was showing a frame
@@ -500,7 +500,7 @@ family was created specifically to supersede it.
   * the starting player is chosen at random instead of always being
     seat 0
   * added `README.md` and the plain-text `LICENSE` (AFL 3.0)
-* **unreleased**
+* **1.2** - Performance Improvements
   * MultiMaxAI thinking now runs on multiple worker threads (root-level
     parallel search): each root move is evaluated independently on its
     own cloned game state.  Scales near-linearly with `-Dtigris.ai.threads`
