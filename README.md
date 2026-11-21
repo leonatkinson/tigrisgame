@@ -72,7 +72,7 @@ command list, `help <command>` for details on a single command, and
 | `-Dtigris.ai.prune=N`                        | branch factor: candidate moves kept per node (default 80; 1000 ≈ unlimited) — for MultiMaxAI, values above ~150 are a no-op                                                                                  |
 | `-Dtigris.ai.keepProb=X`                     | prune assumed opponent support hands below probability X (default 0.01; mostly meaningful for MultiMaxAI)                                                    |
 | `-Dtigris.ai.thinkMillis=N`                  | (**CraigAI only**) wall-clock think time per move (default 30000)                                                                                            |
-| `-Dtigris.ai.threads=N`                      | (**MultiMaxAI only**) worker threads for root-level parallel search: each root move is evaluated on its own cloned game state (default `Runtime.getRuntime().availableProcessors()`, floored at 1)                                                       |
+| `-Dtigris.ai.threads=N`                      | (**MultiMaxAI and CraigAI**) worker threads for root-level parallel search: each root move/decision is evaluated on its own cloned game state (default `Runtime.getRuntime().availableProcessors()`, floored at 1; MiniMaxAI accepts it too but gains little at equal depth because alpha-beta prunes the root serially) |
 
 Example — a deeper, wider search:
 
@@ -508,6 +508,13 @@ family was created specifically to supersede it.
     ~5.5x speedup with 8 threads).  Set `-Dtigris.ai.threads=1` to force
     sequential behaviour, or `-Dtigris.ai.threads=N` to pick N,
     e.g. `-Dtigris.ai.threads=4`.
+  * CraigAI thinking now runs on multiple worker threads too (same
+    root-level parallel search as MultiMaxAI): each root decision is
+    evaluated on its own cloned game state.  Measured ~3.5x speedup
+    with 8 threads at actionDepth=2 (~576 ms -> ~165 ms).
+  * MiniMaxAI accepts `-Dtigris.ai.threads` as well, but gains little
+    at equal depth: alpha-beta prunes the root serially, so parallel
+    workers re-explore nodes sequential pruning would have cut.
   * Add move ordering to MiniMaxAI.generateMoves(): pre-score root
     candidates with the static evaluator and try best moves first, so
     alpha-beta gets a strong opening bound and prunes weak branches
